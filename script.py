@@ -1,13 +1,20 @@
 # Instagram Follower Analyzer (Premium GUI Version)
-import tkinter as tk
-from tkinter import ttk, messagebox, simpledialog
+"""Instagram follower analysis utility with optional GUI and CLI modes."""
+
+from __future__ import annotations
+
+import argparse
+import getpass
+import json
+import os
+import re
 import threading
+import tkinter as tk
+from datetime import datetime, timedelta
+from tkinter import messagebox, simpledialog, ttk
+
 import concurrent.futures
 import csv
-import os
-import json
-import re
-from datetime import datetime, timedelta
 import instaloader
 
 # Attempt to import cryptography; provide fallback warning if not installed
@@ -66,15 +73,66 @@ def is_session_expired(meta_file):
     return datetime.now() - saved_time > timedelta(hours=SESSION_EXPIRATION_HOURS)
 
 # Load settings
-config = json.load(open(CONFIG_FILE)) if os.path.exists(CONFIG_FILE) else {}
+if os.path.exists(CONFIG_FILE):
+    with open(CONFIG_FILE) as f:
+        config = json.load(f)
+else:
+    config = {}
 encryption_key = load_or_create_key()
 
+
+def login_with_session(loader: instaloader.Instaloader, username: str, password: str | None) -> instaloader.Instaloader:
+    """Login to Instagram using saved session when possible."""
+    raw_path = f"{SESSION_FILE}_raw-{username}"
+    enc_path = f"{SESSION_FILE}_enc-{username}"
+    meta_path = f"{SESSION_FILE}_meta-{username}.json"
+
+    if Fernet and os.path.exists(enc_path) and not is_session_expired(meta_path):
+        decrypt_file(enc_path, raw_path, encryption_key)
+        loader.load_session_from_file(username, raw_path)
+        os.remove(raw_path)
+        return loader
+
+    if not password:
+        raise ValueError("Password is required")
+
+    loader.login(username, password)
+    loader.save_session_to_file(raw_path)
+    if Fernet:
+        encrypt_file(raw_path, enc_path, encryption_key)
+        with open(meta_path, "w") as f:
+            json.dump({"timestamp": datetime.now().isoformat()}, f)
+    return loader
+
 def is_likely_fake(username):
-    return sum([
-        len(username) < 5 or len(username) > 20,
-        bool(re.search(r"\d{4,}", username)),
-        username.count("_") > 1
-    ]) >= 2
+    """Heuristic check for accounts that might be fake."""
+    return sum(
+        [
+            len(username) < 5 or len(username) > 20,
+            bool(re.search(r"\d{4,}", username)),
+            username.count("_") > 1,
+        ]
+    ) >= 2
+
+
+def analyze_account(loader: instaloader.Instaloader, username: str) -> dict[str, list[str] | set[str]]:
+    """Return analysis information for *username* using *loader*."""
+    profile = instaloader.Profile.from_username(loader.context, username)
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        followers = executor.submit(lambda: {f.username for f in profile.get_followers()}).result()
+        followees = executor.submit(lambda: {f.username for f in profile.get_followees()}).result()
+
+    mutual = sorted(followees & followers)
+    not_following_back = sorted(followees - followers)
+    fans = sorted(followers - followees)
+    fake_followers = sorted([u for u in followers if is_likely_fake(u)])
+    return {
+        "mutual": mutual,
+        "not_following_back": not_following_back,
+        "fans": fans,
+        "fake_followers": fake_followers,
+        "followers": followers,
+    }
 
 # GUI Setup
 class InstaAnalyzerGUI:
@@ -202,40 +260,42 @@ class InstaAnalyzerGUI:
         try:
             self.update_status("Fetching profile...")
             self.update_progress(40)
-            profile = instaloader.Profile.from_username(L.context, username)
 
-            with concurrent.futures.ThreadPoolExecutor() as executor:
-                followers = executor.submit(lambda: {f.username for f in profile.get_followers()}).result()
-                followees = executor.submit(lambda: {f.username for f in profile.get_followees()}).result()
-
-            mutual = sorted(followees & followers)
-            not_following_back = sorted(followees - followers)
-            fans = sorted(followers - followees)
-            fake_followers = sorted([u for u in followers if is_likely_fake(u)])
+            data = analyze_account(L, username)
 
             self.update_status("Analysis complete.")
             self.update_progress(90)
 
             lines = [
-                f"Mutual Followers ({len(mutual)}):", *[f"  - {u}" for u in mutual],
-                f"\nNot Following Back ({len(not_following_back)}):", *[f"  - {u}" for u in not_following_back],
-                f"\nFans ({len(fans)}):", *[f"  - {u}" for u in fans],
-                f"\nSuspected Fake Followers ({len(fake_followers)}):", *[f"  - {u}" for u in fake_followers]
+                f"Mutual Followers ({len(data['mutual'])}):",
+                *[f"  - {u}" for u in data['mutual']],
+                f"\nNot Following Back ({len(data['not_following_back'])}):",
+                *[f"  - {u}" for u in data['not_following_back']],
+                f"\nFans ({len(data['fans'])}):",
+                *[f"  - {u}" for u in data['fans']],
+                f"\nSuspected Fake Followers ({len(data['fake_followers'])}):",
+                *[f"  - {u}" for u in data['fake_followers']],
             ]
 
             if lookup_user:
-                lines.append(f"\n@{lookup_user} follows you: {'✅ YES' if lookup_user in followers else '❌ NO'}")
+                lines.append(
+                    f"\n@{lookup_user} follows you: {'✅ YES' if lookup_user in data['followers'] else '❌ NO'}"
+                )
 
             self.append_output(lines)
 
             filename = f"results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-            with open(filename, "w", newline='', encoding='utf-8') as f:
+            with open(filename, "w", newline="", encoding="utf-8") as f:
                 writer = csv.writer(f)
                 writer.writerow(["Relation", "Username"])
-                for u in mutual: writer.writerow(["Mutual", u])
-                for u in not_following_back: writer.writerow(["Not Following", u])
-                for u in fans: writer.writerow(["Fan", u])
-                for u in fake_followers: writer.writerow(["Fake", u])
+                for u in data["mutual"]:
+                    writer.writerow(["Mutual", u])
+                for u in data["not_following_back"]:
+                    writer.writerow(["Not Following", u])
+                for u in data["fans"]:
+                    writer.writerow(["Fan", u])
+                for u in data["fake_followers"]:
+                    writer.writerow(["Fake", u])
 
             self.update_progress(100)
             self.update_status("Results saved ✔")
@@ -245,8 +305,49 @@ class InstaAnalyzerGUI:
             messagebox.showerror("Error", str(e))
             self.update_status("Process Failed")
 
+
+def run_cli(username: str, password: str | None, lookup_user: str | None) -> None:
+    """Simple command-line interface when no GUI is available."""
+    loader = login_with_session(instaloader.Instaloader(), username, password)
+    data = analyze_account(loader, username)
+
+    print(f"Mutual Followers ({len(data['mutual'])}):")
+    for u in data["mutual"]:
+        print(f"  - {u}")
+
+    print(f"\nNot Following Back ({len(data['not_following_back'])}):")
+    for u in data["not_following_back"]:
+        print(f"  - {u}")
+
+    print(f"\nFans ({len(data['fans'])}):")
+    for u in data["fans"]:
+        print(f"  - {u}")
+
+    print(f"\nSuspected Fake Followers ({len(data['fake_followers'])}):")
+    for u in data["fake_followers"]:
+        print(f"  - {u}")
+
+    if lookup_user:
+        status = "YES" if lookup_user in data["followers"] else "NO"
+        print(f"\n@{lookup_user} follows you: {status}")
+
 # Initialize app
 if __name__ == "__main__":
-    root = tk.Tk()
-    app = InstaAnalyzerGUI(root)
-    root.mainloop()
+    parser = argparse.ArgumentParser(description="Instagram Follower Analyzer")
+    parser.add_argument("--cli", action="store_true", help="Run in command line mode")
+    parser.add_argument("-u", "--username", help="Instagram username")
+    parser.add_argument("-p", "--password", help="Instagram password")
+    parser.add_argument("-l", "--lookup", help="Check if user follows you")
+    args = parser.parse_args()
+
+    if args.cli or not os.environ.get("DISPLAY"):
+        if not args.username:
+            args.username = input("Instagram Username: ").strip()
+        if not args.password:
+            args.password = getpass.getpass("Password: ")
+        lookup = (args.lookup or input("Lookup user (optional): ")).strip().lower() or None
+        run_cli(args.username, args.password, lookup)
+    else:
+        root = tk.Tk()
+        app = InstaAnalyzerGUI(root)
+        root.mainloop()
