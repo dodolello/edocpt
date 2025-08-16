@@ -1,0 +1,9 @@
+<metro:MetroWindow x:Class="Edocpt.App.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:metro="http://metro.mahapps.com/winfx/xaml/controls"
+        Title="Edocpt Monitor" Height="450" Width="800">
+    <Grid>
+        <TextBlock Text="Monitoring Dashboard Placeholder" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+    </Grid>
+</metro:MetroWindow>
